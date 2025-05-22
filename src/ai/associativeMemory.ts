@@ -5,38 +5,35 @@ import * as arrow from "apache-arrow";
 import { initModel, EmbeddingsModel, EmbeddingsModelSource } from "@energetic-ai/embeddings"; // Import EmbeddingsModelSource
 import { modelSource as defaultEmbeddingModelSource } from "@energetic-ai/model-embeddings-en"; // Default model source
 import fs from 'fs/promises'; // For ensuring directory exists
+import * as path from 'path'; // For joining paths
+
+// Define an extended interface for the embedding model
+interface ExtendedEmbeddingsModel extends EmbeddingsModel {
+  dimension: number;
+}
 
 // Define table names
 const PERSISTENT_TABLE_NAME = "persistent_memory";
 const SESSION_TABLE_PREFIX = "session_";
 
-// Define schemas using Apache Arrow
-// TODO: Determine the exact vector dimension from the embedding model after loading
-const VECTOR_DIMENSION = 384; // Placeholder - GET THIS FROM THE MODEL
-
-const sessionSchema = new arrow.Schema([
-    new arrow.Field("vector", new arrow.FixedSizeList(VECTOR_DIMENSION, new arrow.Field("item", new arrow.Float32()))),
-    new arrow.Field("text", new arrow.Utf8()),
-    new arrow.Field("source", new arrow.Utf8()),
-    new arrow.Field("timestamp", new arrow.TimestampMillisecond()),
-]);
-
-const persistentSchema = new arrow.Schema([
-    new arrow.Field("vector", new arrow.FixedSizeList(VECTOR_DIMENSION, new arrow.Field("item", new arrow.Float32()))),
-    new arrow.Field("text", new arrow.Utf8()),
-    new arrow.Field("source_ids", new arrow.List(new arrow.Field("item", new arrow.Utf8()))),
-    new arrow.Field("timestamp", new arrow.TimestampMillisecond()),
-    new arrow.Field("last_accessed", new arrow.TimestampMillisecond()), // Added as per plan
-]);
+// Default dimension if model fails to provide one.
+const DEFAULT_VECTOR_DIMENSION = 384;
+const TABLE_DIMENSIONS_FILENAME = "table_dimensions.json";
 
 
 export class MemoryManager {
-    private embeddingModel: EmbeddingsModel | null = null;
+    private embeddingModel: ExtendedEmbeddingsModel | null = null;
     private db: lancedb.Connection | null = null;
     private dbPath: string;
     private embeddingModelSource: EmbeddingsModelSource; // Store the source object
     private isInitialized = false;
     private assistant: any; // Reference to the main assistant instance
+    private actualVectorDimension: number; // To store the dimension from the model
+
+    // Instance-specific schemas
+    private sessionSchema: arrow.Schema | null = null;
+    private persistentSchema: arrow.Schema | null = null;
+    private tableDimensions: Record<string, number> = {}; // To store dimensions of tables
 
     constructor(assistant: any, dbPath: string, embeddingModelSource?: string) {
         this.assistant = assistant; // Store assistant reference
@@ -44,15 +41,44 @@ export class MemoryManager {
         // TODO: Handle selecting different sources based on string config more robustly if needed
         // For now, primarily use the default imported source. The config string isn't directly used here yet.
         this.embeddingModelSource = defaultEmbeddingModelSource;
+        this.actualVectorDimension = DEFAULT_VECTOR_DIMENSION; // Initialize with default
         console.log(`MemoryManager configured with DB path: ${this.dbPath} and Default Embedding model source`);
         console.log(`MemoryManager configured with DB path: ${this.dbPath} and Default Embedding model source`); // Corrected log message
     }
 
+    private _generateSchema(dimension: number, type: 'session' | 'persistent'): arrow.Schema {
+        if (!(dimension > 0 && Number.isInteger(dimension))) {
+            console.error(`CRITICAL: Invalid dimension (${dimension}) provided for schema generation. Falling back to default dimension: ${DEFAULT_VECTOR_DIMENSION}.`);
+            dimension = DEFAULT_VECTOR_DIMENSION;
+        }
+
+        const vectorField = new arrow.Field("vector", new arrow.FixedSizeList(dimension, new arrow.Field("item", new arrow.Float32())));
+        const textField = new arrow.Field("text", new arrow.Utf8());
+        const timestampField = new arrow.Field("timestamp", new arrow.TimestampMillisecond());
+
+        if (type === 'session') {
+            return new arrow.Schema([
+                vectorField,
+                textField,
+                new arrow.Field("source", new arrow.Utf8()),
+                timestampField,
+            ]);
+        } else { // persistent
+            return new arrow.Schema([
+                vectorField,
+                textField,
+                new arrow.Field("source_ids", new arrow.List(new arrow.Field("item", new arrow.Utf8()))),
+                timestampField,
+                new arrow.Field("last_accessed", new arrow.TimestampMillisecond()),
+            ]);
+        }
+    }
+
     async initialize(sessionId: string): Promise<void> {
-        if (this.isInitialized) {
+        if (this.isInitialized && this.sessionSchema && this.persistentSchema) {
             console.log("MemoryManager already initialized.");
-            // Ensure session table exists for the *current* session ID
-            await this.ensureTableExists(this.getSessionTableName(sessionId), sessionSchema);
+            // Ensure session table exists for the *current* session ID, using the instance schema
+            await this.ensureTableExists(this.getSessionTableName(sessionId), this.sessionSchema!); // Schema should be non-null if initialized
             return;
         }
 
@@ -62,6 +88,9 @@ export class MemoryManager {
             await fs.mkdir(this.dbPath, { recursive: true });
             console.log(`LanceDB directory ensured at: ${this.dbPath}`);
 
+            // 1.5 Load table dimensions information
+            await this._loadTableDimensions();
+
             // 2. Connect to LanceDB
             this.db = await lancedb.connect(this.dbPath);
             console.log("Connected to LanceDB.");
@@ -69,21 +98,29 @@ export class MemoryManager {
             // 3. Load Embedding Model
             // Pass the stored source object to initModel
             const modelSource = this.embeddingModelSource;
-            this.embeddingModel = await initModel(modelSource);
-            // TODO: Get actual vector dimension from the loaded model
-            // const actualDimension = this.embeddingModel.dimension; // Or similar property
-            // if (actualDimension !== VECTOR_DIMENSION) {
-            //    console.warn(`Mismatch vector dimension! Expected ${VECTOR_DIMENSION}, got ${actualDimension}. Schemas need update.`);
-            //    // Need to recreate schemas with actualDimension here if dynamically handling
-            // } else {
-            //    console.warn(`Could not determine embedding dimension from model.`);
-            // }
-            console.log(`Embedding model loaded. Dimension: ${VECTOR_DIMENSION} (Placeholder)`);
+            this.embeddingModel = await initModel(modelSource) as ExtendedEmbeddingsModel; // Cast to extended interface
 
+            // Get actual vector dimension from the loaded model
+            if (this.embeddingModel && typeof this.embeddingModel.dimension === 'number' && this.embeddingModel.dimension > 0) {
+                this.actualVectorDimension = this.embeddingModel.dimension;
+                console.log(`Embedding model loaded. Actual vector dimension: ${this.actualVectorDimension}`);
+            } else {
+                console.warn(`CRITICAL: Could not determine a valid embedding dimension from the model (received: ${this.embeddingModel?.dimension}). Falling back to default dimension: ${this.actualVectorDimension}.`);
+                // this.actualVectorDimension was already initialized with DEFAULT_VECTOR_DIMENSION
+            }
 
-            // 4. Ensure tables exist
-            await this.ensureTableExists(PERSISTENT_TABLE_NAME, persistentSchema);
-            await this.ensureTableExists(this.getSessionTableName(sessionId), sessionSchema);
+            // 4. Generate schemas based on the determined (or default) actualVectorDimension
+            this.persistentSchema = this._generateSchema(this.actualVectorDimension, 'persistent');
+            this.sessionSchema = this._generateSchema(this.actualVectorDimension, 'session');
+            console.log(`Schemas generated with dimension: ${this.actualVectorDimension}`);
+
+            // 5. Ensure tables exist using the newly generated instance schemas
+            if (!this.persistentSchema || !this.sessionSchema) {
+                 // This should not happen if _generateSchema has proper fallbacks
+                throw new Error("Schemas could not be generated during initialization.");
+            }
+            await this.ensureTableExists(PERSISTENT_TABLE_NAME, this.persistentSchema);
+            await this.ensureTableExists(this.getSessionTableName(sessionId), this.sessionSchema);
 
             this.isInitialized = true;
             console.log("MemoryManager initialized successfully.");
@@ -104,6 +141,34 @@ export class MemoryManager {
         return `${SESSION_TABLE_PREFIX}${sanitizedSessionId}`;
     }
 
+    private async _loadTableDimensions(): Promise<void> {
+        const filePath = path.join(this.dbPath, TABLE_DIMENSIONS_FILENAME);
+        try {
+            const data = await fs.readFile(filePath, 'utf-8');
+            this.tableDimensions = JSON.parse(data);
+            console.log("Table dimensions loaded successfully from:", filePath);
+        } catch (error: any) {
+            if (error.code === 'ENOENT') {
+                console.log("Table dimensions file not found. Will be created if new tables are made.", filePath);
+                this.tableDimensions = {}; // Initialize as empty
+            } else {
+                console.warn(`Error loading table dimensions from ${filePath}: ${error.message}. Starting with empty dimensions.`);
+                this.tableDimensions = {}; // Initialize as empty on other errors (e.g., corrupted JSON)
+            }
+        }
+    }
+
+    private async _saveTableDimensions(): Promise<void> {
+        const filePath = path.join(this.dbPath, TABLE_DIMENSIONS_FILENAME);
+        try {
+            const data = JSON.stringify(this.tableDimensions, null, 2);
+            await fs.writeFile(filePath, data, 'utf-8');
+            console.log("Table dimensions saved successfully to:", filePath);
+        } catch (error: any) {
+            console.error(`Error saving table dimensions to ${filePath}: ${error.message}`);
+        }
+    }
+
     private async ensureTableExists(tableName: string, schema: arrow.Schema): Promise<lancedb.Table> {
         if (!this.db) {
             throw new Error("Database connection not initialized.");
@@ -112,28 +177,35 @@ export class MemoryManager {
             console.log(`Attempting to open table: ${tableName}`);
             const table = await this.db.openTable(tableName);
             console.log(`Table "${tableName}" opened successfully.`);
-            // TODO: Optionally check if schema matches and handle migration/recreation if needed
+
+            const storedDimension = this.tableDimensions[tableName];
+            if (storedDimension !== undefined) {
+                if (storedDimension !== this.actualVectorDimension) {
+                    console.warn(`WARNING: Dimension mismatch for table '${tableName}'. Stored: ${storedDimension}, Current Model: ${this.actualVectorDimension}. Proceeding with current model's dimension. Data inconsistency may occur.`);
+                    // Option 1: Proceeding with current model's dimension. Schema used is already based on actualVectorDimension.
+                }
+                // If dimensions match, proceed as normal.
+            } else {
+                // Existing table but no dimension info found for it.
+                console.warn(`WARNING: Dimension for existing table '${tableName}' not found in tracking file. Assuming current model dimension: ${this.actualVectorDimension} and saving it. If this table was created with a different dimension, errors may occur.`);
+                this.tableDimensions[tableName] = this.actualVectorDimension;
+                await this._saveTableDimensions();
+            }
             return table;
         } catch (error: any) {
-            // Error code for "table not found" might vary, check LanceDB specifics
-            // Assuming error message contains "Not found" or similar for non-existent table
             if (error.message && error.message.toLowerCase().includes('not found')) {
                 console.log(`Table "${tableName}" not found, creating...`);
                 try {
-                    // Use createEmptyTable when creating based on schema without initial data
                     const table = await this.db.createEmptyTable(tableName, schema);
-                    // Alternative: Create empty table if schema is complex or data added later
-                    // const table = await this.db.createEmptyTable(tableName, schema);
-                    console.log(`Table "${tableName}" created successfully.`);
-                    // Create vector index immediately? Or defer? Deferring for now.
-                    // await table.createIndex({ column: 'vector' }); // Example index creation
+                    console.log(`Table "${tableName}" created successfully with dimension ${this.actualVectorDimension}.`);
+                    this.tableDimensions[tableName] = this.actualVectorDimension;
+                    await this._saveTableDimensions();
                     return table;
                 } catch (createError) {
                     console.error(`Failed to create table "${tableName}":`, createError);
-                    throw createError; // Re-throw creation error
+                    throw createError;
                 }
             } else {
-                // Re-throw unexpected errors during openTable
                 console.error(`Error opening table "${tableName}":`, error);
                 throw error;
             }
