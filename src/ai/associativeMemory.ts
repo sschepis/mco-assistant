@@ -20,6 +20,14 @@ const SESSION_TABLE_PREFIX = "session_";
 const DEFAULT_VECTOR_DIMENSION = 384;
 const TABLE_DIMENSIONS_FILENAME = "table_dimensions.json";
 
+// Current Schema Versions
+const CURRENT_PERSISTENT_SCHEMA_VERSION = 1;
+const CURRENT_SESSION_SCHEMA_VERSION = 1;
+
+interface TableInfo {
+    dimension: number;
+    schemaVersion: number;
+}
 
 export class MemoryManager {
     private embeddingModel: ExtendedEmbeddingsModel | null = null;
@@ -33,7 +41,7 @@ export class MemoryManager {
     // Instance-specific schemas
     private sessionSchema: arrow.Schema | null = null;
     private persistentSchema: arrow.Schema | null = null;
-    private tableDimensions: Record<string, number> = {}; // To store dimensions of tables
+    private tableDimensions: Record<string, TableInfo> = {}; // Updated type
 
     constructor(assistant: any, dbPath: string, embeddingModelSource?: string) {
         this.assistant = assistant; // Store assistant reference
@@ -141,20 +149,61 @@ export class MemoryManager {
         return `${SESSION_TABLE_PREFIX}${sanitizedSessionId}`;
     }
 
+    private _getTableType(tableName: string): 'session' | 'persistent' | 'unknown' {
+        if (tableName === PERSISTENT_TABLE_NAME) {
+            return 'persistent';
+        }
+        if (tableName.startsWith(SESSION_TABLE_PREFIX)) {
+            return 'session';
+        }
+        return 'unknown';
+    }
+
     private async _loadTableDimensions(): Promise<void> {
         const filePath = path.join(this.dbPath, TABLE_DIMENSIONS_FILENAME);
+        let loadedData: Record<string, any> = {};
         try {
-            const data = await fs.readFile(filePath, 'utf-8');
-            this.tableDimensions = JSON.parse(data);
-            console.log("Table dimensions loaded successfully from:", filePath);
+            const fileContent = await fs.readFile(filePath, 'utf-8');
+            loadedData = JSON.parse(fileContent);
+            console.log("Table dimensions data loaded successfully from:", filePath);
         } catch (error: any) {
             if (error.code === 'ENOENT') {
                 console.log("Table dimensions file not found. Will be created if new tables are made.", filePath);
-                this.tableDimensions = {}; // Initialize as empty
             } else {
                 console.warn(`Error loading table dimensions from ${filePath}: ${error.message}. Starting with empty dimensions.`);
-                this.tableDimensions = {}; // Initialize as empty on other errors (e.g., corrupted JSON)
             }
+            this.tableDimensions = {};
+            return;
+        }
+
+        const newTableDimensions: Record<string, TableInfo> = {};
+        let needsSave = false;
+        for (const tableName of Object.keys(loadedData)) {
+            const entry = loadedData[tableName];
+            if (typeof entry === 'number') { // Old format
+                newTableDimensions[tableName] = { dimension: entry, schemaVersion: 1 };
+                console.log(`INFO: Upgraded table info for '${tableName}' to new format (dimension: ${entry}, schemaVersion: 1).`);
+                needsSave = true;
+            } else if (typeof entry === 'object' && entry !== null) {
+                if (typeof entry.dimension !== 'number') {
+                    console.warn(`WARNING: Table '${tableName}' in ${TABLE_DIMENSIONS_FILENAME} lacks a valid dimension. Using default: ${DEFAULT_VECTOR_DIMENSION}.`);
+                    entry.dimension = DEFAULT_VECTOR_DIMENSION;
+                    needsSave = true;
+                }
+                if (typeof entry.schemaVersion !== 'number') {
+                    console.log(`INFO: Table '${tableName}' in ${TABLE_DIMENSIONS_FILENAME} lacks schemaVersion. Assuming version 1.`);
+                    entry.schemaVersion = 1;
+                    needsSave = true;
+                }
+                newTableDimensions[tableName] = { dimension: entry.dimension, schemaVersion: entry.schemaVersion };
+            } else {
+                console.warn(`WARNING: Invalid entry for table '${tableName}' in ${TABLE_DIMENSIONS_FILENAME}. Skipping.`);
+            }
+        }
+        this.tableDimensions = newTableDimensions;
+        if (needsSave) {
+            console.log("Attempting to save upgraded table dimensions data immediately after load.");
+            await this._saveTableDimensions(); // Save immediately if any upgrades happened
         }
     }
 
@@ -178,17 +227,46 @@ export class MemoryManager {
             const table = await this.db.openTable(tableName);
             console.log(`Table "${tableName}" opened successfully.`);
 
-            const storedDimension = this.tableDimensions[tableName];
-            if (storedDimension !== undefined) {
-                if (storedDimension !== this.actualVectorDimension) {
-                    console.warn(`WARNING: Dimension mismatch for table '${tableName}'. Stored: ${storedDimension}, Current Model: ${this.actualVectorDimension}. Proceeding with current model's dimension. Data inconsistency may occur.`);
-                    // Option 1: Proceeding with current model's dimension. Schema used is already based on actualVectorDimension.
+            const storedInfo = this.tableDimensions[tableName];
+            const tableType = this._getTableType(tableName);
+            let expectedCurrentSchemaVersion = 0;
+            if (tableType === 'persistent') expectedCurrentSchemaVersion = CURRENT_PERSISTENT_SCHEMA_VERSION;
+            else if (tableType === 'session') expectedCurrentSchemaVersion = CURRENT_SESSION_SCHEMA_VERSION;
+
+            if (storedInfo) {
+                // Dimension Check
+                if (storedInfo.dimension !== this.actualVectorDimension) {
+                    console.warn(`WARNING: Dimension mismatch for table '${tableName}'. Stored: ${storedInfo.dimension}, Current Model: ${this.actualVectorDimension}. Proceeding with current model's dimension. Data inconsistency may occur.`);
                 }
-                // If dimensions match, proceed as normal.
+
+                // Schema Version Check (only if tableType is known)
+                if (tableType !== 'unknown' && expectedCurrentSchemaVersion > 0) {
+                    if (storedInfo.schemaVersion < expectedCurrentSchemaVersion) {
+                        // Call migration logic
+                        await this._migrateTable(
+                            tableName,
+                            storedInfo,
+                            schema, // This is the newExpectedSchema
+                            expectedCurrentSchemaVersion,
+                            this.actualVectorDimension
+                        );
+                        // After migration, the table is now considered up-to-date and opened/recreated by _migrateTable
+                        // We need to return the table instance. _migrateTable should return it or ensureTableExists should re-open it.
+                        // For simplicity now, assume _migrateTable handles recreation and we can re-open.
+                        // This might be inefficient but ensures consistency with how tables are usually returned.
+                        return this.db!.openTable(tableName); // Re-open the table to get a valid instance after migration
+                    } else if (storedInfo.schemaVersion > expectedCurrentSchemaVersion) {
+                        console.warn(`CRITICAL WARNING: Table '${tableName}' has a future schema version (Stored: ${storedInfo.schemaVersion}, Current: ${expectedCurrentSchemaVersion}). This may indicate an issue with the software version. Proceeding with caution.`);
+                    }
+                }
             } else {
-                // Existing table but no dimension info found for it.
-                console.warn(`WARNING: Dimension for existing table '${tableName}' not found in tracking file. Assuming current model dimension: ${this.actualVectorDimension} and saving it. If this table was created with a different dimension, errors may occur.`);
-                this.tableDimensions[tableName] = this.actualVectorDimension;
+                // Existing table but no dimension/version info found for it.
+                console.warn(`WARNING: Information for existing table '${tableName}' not found in tracking file. Assuming current model dimension (${this.actualVectorDimension}) and schema version, then saving.`);
+                const currentSchemaVersion = tableType === 'persistent' ? CURRENT_PERSISTENT_SCHEMA_VERSION : (tableType === 'session' ? CURRENT_SESSION_SCHEMA_VERSION : 1); // Default to 1 if unknown type
+                this.tableDimensions[tableName] = {
+                    dimension: this.actualVectorDimension,
+                    schemaVersion: currentSchemaVersion
+                };
                 await this._saveTableDimensions();
             }
             return table;
@@ -197,8 +275,14 @@ export class MemoryManager {
                 console.log(`Table "${tableName}" not found, creating...`);
                 try {
                     const table = await this.db.createEmptyTable(tableName, schema);
-                    console.log(`Table "${tableName}" created successfully with dimension ${this.actualVectorDimension}.`);
-                    this.tableDimensions[tableName] = this.actualVectorDimension;
+                    const tableType = this._getTableType(tableName);
+                    const schemaVersionToStore = tableType === 'persistent' ? CURRENT_PERSISTENT_SCHEMA_VERSION : (tableType === 'session' ? CURRENT_SESSION_SCHEMA_VERSION : 1); // Default to 1 if unknown type
+
+                    console.log(`Table "${tableName}" created successfully with dimension ${this.actualVectorDimension} and schema version ${schemaVersionToStore}.`);
+                    this.tableDimensions[tableName] = {
+                        dimension: this.actualVectorDimension,
+                        schemaVersion: schemaVersionToStore
+                    };
                     await this._saveTableDimensions();
                     return table;
                 } catch (createError) {
@@ -206,9 +290,48 @@ export class MemoryManager {
                     throw createError;
                 }
             } else {
-                console.error(`Error opening table "${tableName}":`, error);
-                throw error;
+                if (error.message && error.message.startsWith('Migration failed for table')) {
+                    // Error came from _migrateTable
+                    console.error(`CRITICAL: Migration failed for table '${tableName}'. The table may be in an inconsistent state. Error: ${error.message}`);
+                } else {
+                    // Other types of errors during openTable (not 'not found' or migration)
+                    console.error(`Error preparing table "${tableName}":`, error);
+                }
+                throw error; // Re-throw the original error
             }
+        }
+    }
+
+    private async _migrateTable(
+        tableName: string,
+        oldStoredInfo: TableInfo,
+        newExpectedSchema: arrow.Schema,
+        newExpectedVersion: number,
+        newExpectedDimension: number
+    ): Promise<void> {
+        console.warn(`Attempting to migrate table '${tableName}' from schema version ${oldStoredInfo.schemaVersion} (dimension ${oldStoredInfo.dimension}) to schema version ${newExpectedVersion} (dimension ${newExpectedDimension}). Current simple migration will drop and recreate the table, resulting in data loss for this table.`);
+        try {
+            if (!this.db) { // Should always be true if called from ensureTableExists after db init
+                throw new Error("Database connection not initialized during migration attempt.");
+            }
+            await this.db.dropTable(tableName);
+            console.log(`Table '${tableName}' dropped successfully as part of migration.`);
+
+            await this.db.createEmptyTable(tableName, newExpectedSchema);
+            console.log(`Table '${tableName}' recreated successfully with new schema (version ${newExpectedVersion}, dimension ${newExpectedDimension}).`);
+
+            // Update tableDimensions and save
+            this.tableDimensions[tableName] = {
+                dimension: newExpectedDimension,
+                schemaVersion: newExpectedVersion,
+            };
+            await this._saveTableDimensions();
+            console.log(`Table info for '${tableName}' updated and saved after migration.`);
+
+        } catch (error) {
+            console.error(`CRITICAL: Error during migration of table '${tableName}': ${error instanceof Error ? error.message : String(error)}. Table may be in an inconsistent state (e.g., dropped but not recreated, or info not updated).`);
+            // Depending on recovery strategy, might re-throw or set a specific state
+            throw new Error(`Migration failed for table ${tableName}: ${error instanceof Error ? error.message : String(error)}`);
         }
     }
 

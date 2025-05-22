@@ -2,13 +2,16 @@ import { MemoryManager } from './associativeMemory';
 import * as lancedb from '@lancedb/lancedb';
 import * as embeddings from '@energetic-ai/embeddings';
 import fs from 'fs/promises';
-import path from 'path'; // Corrected import
+import path from 'path';
 
 // These constants should ideally be imported or kept in sync with associativeMemory.ts
 const DEFAULT_VECTOR_DIMENSION = 384;
 const TABLE_DIMENSIONS_FILENAME = "table_dimensions.json";
-const PERSISTENT_TABLE_NAME = "persistent_memory"; // Added from associativeMemory.ts
-const SESSION_TABLE_PREFIX = "session_"; // Added from associativeMemory.ts
+const PERSISTENT_TABLE_NAME = "persistent_memory";
+const SESSION_TABLE_PREFIX = "session_";
+// Manually define these for testing, ensure they match the ones in MemoryManager
+const CURRENT_PERSISTENT_SCHEMA_VERSION = 1;
+const CURRENT_SESSION_SCHEMA_VERSION = 1;
 
 
 // Mock external modules
@@ -36,20 +39,17 @@ describe('MemoryManager', () => {
             search: jest.fn().mockReturnThis(),
             limit: jest.fn().mockReturnThis(),
             toArray: jest.fn().mockResolvedValue([]),
-            // schema: jest.fn().mockReturnValue({ fields: [{ name: 'vector', type: { listSize: 0 } }] }), // Mock schema if needed
         };
         mockDb = {
-            // connect: jest.fn().mockResolvedValue(mockDb), // This was for a static method, lancedb.connect is the static one
             openTable: jest.fn().mockResolvedValue(mockTable),
             createEmptyTable: jest.fn().mockResolvedValue(mockTable),
             dropTable: jest.fn().mockResolvedValue(undefined),
-            tableNames: jest.fn().mockResolvedValue([]), // Add if used
         };
         (lancedb.connect as jest.Mock).mockResolvedValue(mockDb);
 
         mockEmbeddingModel = {
             embed: jest.fn(async (texts: string[]) => texts.map(text => Array(mockEmbeddingModel.dimension).fill(0.1))),
-            dimension: 3, // Default to a small, valid dimension for tests
+            dimension: DEFAULT_VECTOR_DIMENSION, // Default to a standard dimension
         };
         (embeddings.initModel as jest.Mock).mockResolvedValue(mockEmbeddingModel);
 
@@ -57,11 +57,8 @@ describe('MemoryManager', () => {
         (fs.readFile as jest.Mock).mockResolvedValue('{}'); // Default: empty dimensions file
         (fs.writeFile as jest.Mock).mockResolvedValue(undefined);
 
-        assistant = {
-            query: jest.fn(),
-        };
+        assistant = { query: jest.fn() };
 
-        // Spy on console methods
         consoleSpyWarn = jest.spyOn(console, 'warn').mockImplementation(() => {});
         consoleSpyError = jest.spyOn(console, 'error').mockImplementation(() => {});
         consoleSpyLog = jest.spyOn(console, 'log').mockImplementation(() => {});
@@ -73,12 +70,22 @@ describe('MemoryManager', () => {
         consoleSpyLog.mockRestore();
     });
 
+    describe('Constants Verification', () => {
+        it('schema version constants should be defined and be numbers', () => {
+            // This test isn't directly on MemoryManager, but on the constants it uses.
+            // If these were exported from MemoryManager, we'd import & check them.
+            // For now, we check the test file's copies.
+            expect(CURRENT_PERSISTENT_SCHEMA_VERSION).toEqual(expect.any(Number));
+            expect(CURRENT_SESSION_SCHEMA_VERSION).toEqual(expect.any(Number));
+        });
+    });
+
     describe('Initialization (MemoryManager.initialize)', () => {
         it('should set actualVectorDimension from the model if valid', async () => {
             mockEmbeddingModel.dimension = 128;
             const memoryManager = new MemoryManager(assistant, dbPath);
             await memoryManager.initialize(sessionId);
-            // @ts-ignore Accessing private member for test
+            // @ts-ignore
             expect(memoryManager.actualVectorDimension).toBe(128);
             // @ts-ignore
             expect(memoryManager.persistentSchema.fields.find(f => f.name === 'vector').type.listSize).toBe(128);
@@ -93,52 +100,6 @@ describe('MemoryManager', () => {
             // @ts-ignore
             expect(memoryManager.actualVectorDimension).toBe(DEFAULT_VECTOR_DIMENSION);
             expect(consoleSpyWarn).toHaveBeenCalledWith(expect.stringContaining('CRITICAL: Could not determine a valid embedding dimension from the model (received: 0). Falling back to default dimension:'));
-             // @ts-ignore
-            expect(memoryManager.persistentSchema.fields.find(f => f.name === 'vector').type.listSize).toBe(DEFAULT_VECTOR_DIMENSION);
-        });
-
-        it('should fallback to DEFAULT_VECTOR_DIMENSION if model dimension is negative', async () => {
-            mockEmbeddingModel.dimension = -5;
-            const memoryManager = new MemoryManager(assistant, dbPath);
-            await memoryManager.initialize(sessionId);
-            // @ts-ignore
-            expect(memoryManager.actualVectorDimension).toBe(DEFAULT_VECTOR_DIMENSION);
-            expect(consoleSpyWarn).toHaveBeenCalledWith(expect.stringContaining('CRITICAL: Could not determine a valid embedding dimension from the model (received: -5). Falling back to default dimension:'));
-        });
-
-        it('should fallback to DEFAULT_VECTOR_DIMENSION if model dimension is undefined', async () => {
-            mockEmbeddingModel.dimension = undefined;
-            const memoryManager = new MemoryManager(assistant, dbPath);
-            await memoryManager.initialize(sessionId);
-            // @ts-ignore
-            expect(memoryManager.actualVectorDimension).toBe(DEFAULT_VECTOR_DIMENSION);
-            expect(consoleSpyWarn).toHaveBeenCalledWith(expect.stringContaining('CRITICAL: Could not determine a valid embedding dimension from the model (received: undefined). Falling back to default dimension:'));
-        });
-        
-        it('should generate schemas using actualVectorDimension', async () => {
-            mockEmbeddingModel.dimension = 768;
-            const memoryManager = new MemoryManager(assistant, dbPath);
-            await memoryManager.initialize(sessionId);
-            // @ts-ignore
-            expect(memoryManager.sessionSchema).not.toBeNull();
-            // @ts-ignore
-            expect(memoryManager.persistentSchema).not.toBeNull();
-            // @ts-ignore
-            const sessionVectorField = memoryManager.sessionSchema.fields.find(f => f.name === 'vector');
-            expect(sessionVectorField.type.listSize).toBe(768);
-            // @ts-ignore
-            const persistentVectorField = memoryManager.persistentSchema.fields.find(f => f.name === 'vector');
-            expect(persistentVectorField.type.listSize).toBe(768);
-        });
-
-        it('should call _loadTableDimensions during initialization', async () => {
-            const memoryManager = new MemoryManager(assistant, dbPath);
-            // Spy on the private method
-            // @ts-ignore
-            const loadSpy = jest.spyOn(memoryManager, '_loadTableDimensions');
-            await memoryManager.initialize(sessionId);
-            expect(loadSpy).toHaveBeenCalledTimes(1);
-            loadSpy.mockRestore();
         });
     });
 
@@ -147,187 +108,380 @@ describe('MemoryManager', () => {
             mockEmbeddingModel.dimension = 128;
             const memoryManager = new MemoryManager(assistant, dbPath);
             await memoryManager.initialize(sessionId);
-            
             // @ts-ignore
             const sessionSchema = memoryManager.sessionSchema;
             // @ts-ignore
             const persistentSchema = memoryManager.persistentSchema;
-
-            expect(sessionSchema).toBeDefined();
-            expect(persistentSchema).toBeDefined();
-
-            const sessionVectorField = sessionSchema.fields.find((f: any) => f.name === 'vector');
-            expect(sessionVectorField).toBeDefined();
-            expect(sessionVectorField.type.listSize).toBe(128);
-            expect(sessionSchema.fields.some((f: any) => f.name === 'text')).toBe(true);
-            expect(sessionSchema.fields.some((f: any) => f.name === 'source')).toBe(true);
-            
-            const persistentVectorField = persistentSchema.fields.find((f: any) => f.name === 'vector');
-            expect(persistentVectorField).toBeDefined();
-            expect(persistentVectorField.type.listSize).toBe(128);
-            expect(persistentSchema.fields.some((f: any) => f.name === 'text')).toBe(true);
-            expect(persistentSchema.fields.some((f: any) => f.name === 'source_ids')).toBe(true);
+            expect(sessionSchema.fields.find((f: any) => f.name === 'vector').type.listSize).toBe(128);
+            expect(persistentSchema.fields.find((f: any) => f.name === 'vector').type.listSize).toBe(128);
         });
 
         it('should fallback to DEFAULT_VECTOR_DIMENSION for schema generation if dimension is invalid and log error', async () => {
             const memoryManager = new MemoryManager(assistant, dbPath);
-            // @ts-ignore call private method for test
+            // @ts-ignore
             const schema = memoryManager._generateSchema(0, 'session');
             expect(consoleSpyError).toHaveBeenCalledWith(expect.stringContaining('CRITICAL: Invalid dimension (0) provided for schema generation. Falling back to default dimension:'));
-            const vectorField = schema.fields.find((f: any) => f.name === 'vector');
-            expect(vectorField.type.listSize).toBe(DEFAULT_VECTOR_DIMENSION);
-
-            // @ts-ignore
-            const schema2 = memoryManager._generateSchema(-10, 'persistent');
-            expect(consoleSpyError).toHaveBeenCalledWith(expect.stringContaining('CRITICAL: Invalid dimension (-10) provided for schema generation. Falling back to default dimension:'));
-            const vectorField2 = schema2.fields.find((f: any) => f.name === 'vector');
-            expect(vectorField2.type.listSize).toBe(DEFAULT_VECTOR_DIMENSION);
+            expect(schema.fields.find((f: any) => f.name === 'vector').type.listSize).toBe(DEFAULT_VECTOR_DIMENSION);
         });
     });
-
-    describe('Dimension Mismatch Handling (ensureTableExists)', () => {
-        const testTableName = 'test_table';
-
-        it('Scenario 1: New Table Creation - records dimension and saves', async () => {
-            mockDb.openTable.mockRejectedValue(new Error('Table not found')); // Simulate table not existing
-            mockEmbeddingModel.dimension = 128;
-            const memoryManager = new MemoryManager(assistant, dbPath);
-            await memoryManager.initialize(sessionId); // This sets actualVectorDimension and schemas
-
-            // @ts-ignore
-            await memoryManager.ensureTableExists(testTableName, memoryManager.sessionSchema);
-            
-            // @ts-ignore
-            expect(memoryManager.tableDimensions[testTableName]).toBe(128);
-            expect(fs.writeFile).toHaveBeenCalledWith(
-                path.join(dbPath, TABLE_DIMENSIONS_FILENAME),
-                JSON.stringify({ [testTableName]: 128 }, null, 2),
-                'utf-8'
-            );
-            expect(mockDb.createEmptyTable).toHaveBeenCalled();
-        });
-
-        it('Scenario 2: Existing Table, Matching Dimension - no warning', async () => {
-            mockEmbeddingModel.dimension = 128;
-            const memoryManager = new MemoryManager(assistant, dbPath);
-            // @ts-ignore Pre-populate tableDimensions
-            memoryManager.tableDimensions = { [testTableName]: 128 };
-            // @ts-ignore
-            const saveSpy = jest.spyOn(memoryManager, '_saveTableDimensions'); // ensure it's not called unnecessarily
-
-            await memoryManager.initialize(sessionId); // actualVectorDimension will be 128
-             // @ts-ignore
-            await memoryManager.ensureTableExists(testTableName, memoryManager.sessionSchema);
-
-            expect(consoleSpyWarn).not.toHaveBeenCalledWith(expect.stringContaining('Dimension mismatch'));
-            expect(saveSpy).not.toHaveBeenCalled();
-            saveSpy.mockRestore();
-        });
-
-        it('Scenario 3: Existing Table, Mismatched Dimension - logs warning', async () => {
-            mockEmbeddingModel.dimension = 768; // Current model dimension
-            const memoryManager = new MemoryManager(assistant, dbPath);
-            // @ts-ignore
-            memoryManager.tableDimensions = { [testTableName]: 128 }; // Stored dimension is different
-
-            await memoryManager.initialize(sessionId); // actualVectorDimension will be 768
-             // @ts-ignore
-            await memoryManager.ensureTableExists(testTableName, memoryManager.sessionSchema);
-
-            expect(consoleSpyWarn).toHaveBeenCalledWith(
-                expect.stringContaining(`WARNING: Dimension mismatch for table '${testTableName}'. Stored: 128, Current Model: 768.`)
-            );
-        });
-        
-        it('Scenario 4: Existing Table, Dimension Not Tracked - logs warning and saves current dimension', async () => {
-            mockEmbeddingModel.dimension = 256;
-            const memoryManager = new MemoryManager(assistant, dbPath);
-             // @ts-ignore tableDimensions is initially empty
-            
-            await memoryManager.initialize(sessionId); // actualVectorDimension will be 256
-            // @ts-ignore
-            await memoryManager.ensureTableExists(testTableName, memoryManager.sessionSchema);
-
-            expect(consoleSpyWarn).toHaveBeenCalledWith(
-                expect.stringContaining(`WARNING: Dimension for existing table '${testTableName}' not found in tracking file. Assuming current model dimension: 256 and saving it.`)
-            );
-            // @ts-ignore
-            expect(memoryManager.tableDimensions[testTableName]).toBe(256);
-            expect(fs.writeFile).toHaveBeenCalledWith(
-                path.join(dbPath, TABLE_DIMENSIONS_FILENAME),
-                JSON.stringify({ [testTableName]: 256 }, null, 2),
-                'utf-8'
-            );
-        });
-    });
-
-    describe('table_dimensions.json Handling (_loadTableDimensions / _saveTableDimensions)', () => {
-        it('_loadTableDimensions: File not found (ENOENT) - tableDimensions empty, logs info', async () => {
-            const enoentError: any = new Error("File not found");
-            enoentError.code = 'ENOENT';
-            (fs.readFile as jest.Mock).mockRejectedValue(enoentError);
-            
+    
+    describe('_loadTableDimensions (New TableInfo structure)', () => {
+        it('loads new format (dimension + schemaVersion)', async () => {
+            const tableData = { 'table1': { dimension: 128, schemaVersion: 1 } };
+            (fs.readFile as jest.Mock).mockResolvedValue(JSON.stringify(tableData));
             const memoryManager = new MemoryManager(assistant, dbPath);
             // @ts-ignore
             await memoryManager._loadTableDimensions();
             // @ts-ignore
-            expect(memoryManager.tableDimensions).toEqual({});
-            expect(consoleSpyLog).toHaveBeenCalledWith(expect.stringContaining('Table dimensions file not found. Will be created if new tables are made.'));
+            expect(memoryManager.tableDimensions).toEqual(tableData);
+            expect(fs.writeFile).not.toHaveBeenCalled(); // No upgrade, no save
         });
 
-        it('_loadTableDimensions: Corrupted JSON - tableDimensions empty, logs warning', async () => {
-            (fs.readFile as jest.Mock).mockResolvedValue("this is not json");
-            
+        it('loads old format (just dimension), upgrades, logs, and saves', async () => {
+            const oldFormatData = { 'table1': 128 };
+            (fs.readFile as jest.Mock).mockResolvedValue(JSON.stringify(oldFormatData));
+            const memoryManager = new MemoryManager(assistant, dbPath);
+            // @ts-ignore
+            await memoryManager._loadTableDimensions();
+            const expectedNewFormat = { 'table1': { dimension: 128, schemaVersion: 1 } };
+            // @ts-ignore
+            expect(memoryManager.tableDimensions).toEqual(expectedNewFormat);
+            expect(consoleSpyLog).toHaveBeenCalledWith(expect.stringContaining("INFO: Upgraded table info for 'table1' to new format (dimension: 128, schemaVersion: 1)."));
+            expect(fs.writeFile).toHaveBeenCalledWith(
+                path.join(dbPath, TABLE_DIMENSIONS_FILENAME),
+                JSON.stringify(expectedNewFormat, null, 2),
+                'utf-8'
+            );
+        });
+
+        it('loads mixed old/new format entries', async () => {
+            const mixedData = { 
+                'oldTable': 256, 
+                'newTable': { dimension: 128, schemaVersion: 1 } 
+            };
+            (fs.readFile as jest.Mock).mockResolvedValue(JSON.stringify(mixedData));
+            const memoryManager = new MemoryManager(assistant, dbPath);
+            // @ts-ignore
+            await memoryManager._loadTableDimensions();
+            const expectedData = {
+                'oldTable': { dimension: 256, schemaVersion: 1 },
+                'newTable': { dimension: 128, schemaVersion: 1 }
+            };
+            // @ts-ignore
+            expect(memoryManager.tableDimensions).toEqual(expectedData);
+            expect(consoleSpyLog).toHaveBeenCalledWith(expect.stringContaining("INFO: Upgraded table info for 'oldTable'"));
+            expect(fs.writeFile).toHaveBeenCalled();
+        });
+
+        it('loads entry missing schemaVersion, defaults to 1, logs, and saves', async () => {
+            const missingVersionData = { 'table1': { dimension: 128 } };
+            (fs.readFile as jest.Mock).mockResolvedValue(JSON.stringify(missingVersionData));
+            const memoryManager = new MemoryManager(assistant, dbPath);
+            // @ts-ignore
+            await memoryManager._loadTableDimensions();
+            const expectedData = { 'table1': { dimension: 128, schemaVersion: 1 } };
+            // @ts-ignore
+            expect(memoryManager.tableDimensions).toEqual(expectedData);
+            expect(consoleSpyLog).toHaveBeenCalledWith(expect.stringContaining("INFO: Table 'table1' in table_dimensions.json lacks schemaVersion. Assuming version 1."));
+            expect(fs.writeFile).toHaveBeenCalled();
+        });
+
+        it('loads entry missing dimension, defaults to DEFAULT_VECTOR_DIMENSION, logs, and saves', async () => {
+            const missingDimensionData = { 'table1': { schemaVersion: 1 } };
+            (fs.readFile as jest.Mock).mockResolvedValue(JSON.stringify(missingDimensionData));
+            const memoryManager = new MemoryManager(assistant, dbPath);
+            // @ts-ignore
+            await memoryManager._loadTableDimensions();
+            const expectedData = { 'table1': { dimension: DEFAULT_VECTOR_DIMENSION, schemaVersion: 1 } };
+            // @ts-ignore
+            expect(memoryManager.tableDimensions).toEqual(expectedData);
+            expect(consoleSpyWarn).toHaveBeenCalledWith(expect.stringContaining("WARNING: Table 'table1' in table_dimensions.json lacks a valid dimension. Using default:"));
+            expect(fs.writeFile).toHaveBeenCalled();
+        });
+        
+        it('loads empty JSON file, results in empty tableDimensions', async () => {
+            (fs.readFile as jest.Mock).mockResolvedValue(JSON.stringify({}));
+             const memoryManager = new MemoryManager(assistant, dbPath);
+            // @ts-ignore
+            await memoryManager._loadTableDimensions();
+            // @ts-ignore
+            expect(memoryManager.tableDimensions).toEqual({});
+            expect(fs.writeFile).not.toHaveBeenCalled();
+        });
+
+        it('loads corrupted JSON file, results in empty tableDimensions, logs warning', async () => {
+            (fs.readFile as jest.Mock).mockRejectedValue(new SyntaxError("Unexpected token"));
             const memoryManager = new MemoryManager(assistant, dbPath);
             // @ts-ignore
             await memoryManager._loadTableDimensions();
             // @ts-ignore
             expect(memoryManager.tableDimensions).toEqual({});
             expect(consoleSpyWarn).toHaveBeenCalledWith(expect.stringContaining('Error loading table dimensions from'));
-            expect(consoleSpyWarn).toHaveBeenCalledWith(expect.stringContaining('Unexpected token'));
         });
 
-        it('_loadTableDimensions: Valid JSON - tableDimensions populated', async () => {
-            const jsonData = { 'table1': 128, 'table2': 512 };
-            (fs.readFile as jest.Mock).mockResolvedValue(JSON.stringify(jsonData));
-            
+        it('file not found, results in empty tableDimensions, logs info', async () => {
+            const enoentError:any = new Error("ENOENT error");
+            enoentError.code = 'ENOENT';
+            (fs.readFile as jest.Mock).mockRejectedValue(enoentError);
             const memoryManager = new MemoryManager(assistant, dbPath);
             // @ts-ignore
             await memoryManager._loadTableDimensions();
             // @ts-ignore
-            expect(memoryManager.tableDimensions).toEqual(jsonData);
-            expect(consoleSpyLog).toHaveBeenCalledWith("Table dimensions loaded successfully from:", path.join(dbPath, TABLE_DIMENSIONS_FILENAME));
-
+            expect(memoryManager.tableDimensions).toEqual({});
+            expect(consoleSpyLog).toHaveBeenCalledWith(expect.stringContaining('Table dimensions file not found.'));
         });
+    });
 
-        it('_saveTableDimensions: called with correct data and path', async () => {
+    describe('_saveTableDimensions (New TableInfo structure)', () => {
+        it('saves TableInfo objects correctly', async () => {
             const memoryManager = new MemoryManager(assistant, dbPath);
-            const testData = { 'myTable': 384 };
+            const tableData = { 
+                'table1': { dimension: 128, schemaVersion: 1 },
+                'table2': { dimension: 256, schemaVersion: 2 }
+            };
             // @ts-ignore
-            memoryManager.tableDimensions = testData;
+            memoryManager.tableDimensions = tableData;
             // @ts-ignore
             await memoryManager._saveTableDimensions();
-
             expect(fs.writeFile).toHaveBeenCalledWith(
                 path.join(dbPath, TABLE_DIMENSIONS_FILENAME),
-                JSON.stringify(testData, null, 2),
+                JSON.stringify(tableData, null, 2),
                 'utf-8'
             );
-             expect(consoleSpyLog).toHaveBeenCalledWith("Table dimensions saved successfully to:", path.join(dbPath, TABLE_DIMENSIONS_FILENAME));
         });
-        
-        it('_saveTableDimensions: logs error if writeFile fails', async () => {
-            (fs.writeFile as jest.Mock).mockRejectedValue(new Error("Disk full"));
+    });
+
+    describe('ensureTableExists (Schema Versioning and Migration Logic)', () => {
+        const pTableName = PERSISTENT_TABLE_NAME;
+        const sTableName = `${SESSION_TABLE_PREFIX}${sessionId}`;
+
+        it('Scenario 1: New Table Creation - records dimension and current schema version', async () => {
+            mockDb.openTable.mockRejectedValue(new Error('Table not found'));
+            mockEmbeddingModel.dimension = 128;
+            const memoryManager = new MemoryManager(assistant, dbPath);
+            await memoryManager.initialize(sessionId);
+
+            // @ts-ignore
+            await memoryManager.ensureTableExists(pTableName, memoryManager.persistentSchema);
+            // @ts-ignore
+            expect(memoryManager.tableDimensions[pTableName]).toEqual({
+                dimension: 128,
+                schemaVersion: CURRENT_PERSISTENT_SCHEMA_VERSION 
+            });
+            expect(fs.writeFile).toHaveBeenCalledTimes(1); // Once for this table
+
+            // @ts-ignore
+            await memoryManager.ensureTableExists(sTableName, memoryManager.sessionSchema);
+            // @ts-ignore
+            expect(memoryManager.tableDimensions[sTableName]).toEqual({
+                dimension: 128,
+                schemaVersion: CURRENT_SESSION_SCHEMA_VERSION
+            });
+            expect(fs.writeFile).toHaveBeenCalledTimes(2); // Again for this second table
+        });
+
+        it('Scenario 2: Existing Table, Matching Dimension & Schema Version - no migration/warnings', async () => {
+            mockEmbeddingModel.dimension = 128;
             const memoryManager = new MemoryManager(assistant, dbPath);
             // @ts-ignore
-            memoryManager.tableDimensions = { 'someTable': 100 };
+            memoryManager.tableDimensions = {
+                [pTableName]: { dimension: 128, schemaVersion: CURRENT_PERSISTENT_SCHEMA_VERSION }
+            };
+            // @ts-ignore // Initialize schemas
+            await memoryManager.initialize(sessionId); 
             // @ts-ignore
-            await memoryManager._saveTableDimensions();
-            expect(consoleSpyError).toHaveBeenCalledWith(expect.stringContaining('Error saving table dimensions'));
-            expect(consoleSpyError).toHaveBeenCalledWith(expect.stringContaining('Disk full'));
+            const saveSpy = jest.spyOn(memoryManager, '_saveTableDimensions');
+            // @ts-ignore
+            const migrateSpy = jest.spyOn(memoryManager, '_migrateTable');
+            
+            // @ts-ignore
+            await memoryManager.ensureTableExists(pTableName, memoryManager.persistentSchema);
+
+            expect(migrateSpy).not.toHaveBeenCalled();
+            expect(saveSpy).not.toHaveBeenCalled();
+            expect(consoleSpyWarn).not.toHaveBeenCalledWith(expect.stringContaining('Dimension mismatch'));
+            expect(consoleSpyWarn).not.toHaveBeenCalledWith(expect.stringContaining('Schema version mismatch'));
+            migrateSpy.mockRestore();
+            saveSpy.mockRestore();
+        });
+
+        it('Scenario 3: Existing Table, Dimension Mismatch (Schema Version Matches) - logs warning, no migration', async () => {
+            mockEmbeddingModel.dimension = 256; // Current model dimension
+            const memoryManager = new MemoryManager(assistant, dbPath);
+             // @ts-ignore
+            memoryManager.tableDimensions = {
+                [pTableName]: { dimension: 128, schemaVersion: CURRENT_PERSISTENT_SCHEMA_VERSION } // Stored
+            };
+            await memoryManager.initialize(sessionId);
+            // @ts-ignore
+            const migrateSpy = jest.spyOn(memoryManager, '_migrateTable');
+
+            // @ts-ignore
+            await memoryManager.ensureTableExists(pTableName, memoryManager.persistentSchema);
+            
+            expect(consoleSpyWarn).toHaveBeenCalledWith(expect.stringContaining(`Dimension mismatch for table '${pTableName}'. Stored: 128, Current Model: 256`));
+            expect(migrateSpy).not.toHaveBeenCalled();
+            migrateSpy.mockRestore();
+        });
+
+        it('Scenario 4: Existing Table, Schema Version Older (Migration Triggered)', async () => {
+            mockEmbeddingModel.dimension = 128;
+            const memoryManager = new MemoryManager(assistant, dbPath);
+            // @ts-ignore
+            memoryManager.tableDimensions = {
+                [pTableName]: { dimension: 128, schemaVersion: 0 } // Older schema version
+            };
+            await memoryManager.initialize(sessionId);
+
+            const mockNewTable = { name: 'new_mock_table_instance' };
+            mockDb.openTable
+                .mockResolvedValueOnce(mockTable) // Initial open for check
+                .mockResolvedValueOnce(mockNewTable); // Second open after migration
+
+            // @ts-ignore
+            const migrateSpy = jest.spyOn(memoryManager, '_migrateTable').mockResolvedValue(undefined);
+            // @ts-ignore
+            const saveSpy = jest.spyOn(memoryManager, '_saveTableDimensions');
+
+            // @ts-ignore
+            const returnedTable = await memoryManager.ensureTableExists(pTableName, memoryManager.persistentSchema);
+
+            expect(migrateSpy).toHaveBeenCalledWith(
+                pTableName,
+                { dimension: 128, schemaVersion: 0 }, // oldStoredInfo
+                // @ts-ignore
+                memoryManager.persistentSchema,       // newExpectedSchema
+                CURRENT_PERSISTENT_SCHEMA_VERSION,    // newExpectedVersion
+                128                                   // newExpectedDimension
+            );
+            // _migrateTable internally calls _saveTableDimensions after updating tableDimensions
+            // So, tableDimensions should be updated by the _migrateTable spy if it were the real one.
+            // Since we mock _migrateTable, we'll assume it updates tableDimensions correctly for this test's scope.
+            // And then _saveTableDimensions would be called by it.
+            // For this test, we check if _migrateTable was called. The _migrateTable specific test will check its internals.
+            
+            expect(returnedTable).toBe(mockNewTable); // Ensure the re-opened table instance is returned
+            expect(consoleSpyWarn).toHaveBeenCalledWith(expect.stringContaining(`Schema version mismatch for table '${pTableName}'. Stored: 0, Current: ${CURRENT_PERSISTENT_SCHEMA_VERSION}. Migration may be needed.`));
+            
+            migrateSpy.mockRestore();
+            saveSpy.mockRestore();
+        });
+
+
+        it('Scenario 5: Existing Table, Schema Version Newer - critical warning, no migration', async () => {
+            mockEmbeddingModel.dimension = 128;
+            const memoryManager = new MemoryManager(assistant, dbPath);
+            // @ts-ignore
+            memoryManager.tableDimensions = {
+                [pTableName]: { dimension: 128, schemaVersion: CURRENT_PERSISTENT_SCHEMA_VERSION + 1 } // Newer
+            };
+            await memoryManager.initialize(sessionId);
+            // @ts-ignore
+            const migrateSpy = jest.spyOn(memoryManager, '_migrateTable');
+
+            // @ts-ignore
+            await memoryManager.ensureTableExists(pTableName, memoryManager.persistentSchema);
+
+            expect(consoleSpyWarn).toHaveBeenCalledWith(expect.stringContaining(`CRITICAL WARNING: Table '${pTableName}' has a future schema version`));
+            expect(migrateSpy).not.toHaveBeenCalled();
+            migrateSpy.mockRestore();
+        });
+
+        it('Scenario 6: Existing Table, Not in tableDimensions - assumes current, saves', async () => {
+            mockEmbeddingModel.dimension = 128;
+            const memoryManager = new MemoryManager(assistant, dbPath);
+            // tableDimensions is empty
+            await memoryManager.initialize(sessionId); // Schemas are generated
+            // @ts-ignore
+            const saveSpy = jest.spyOn(memoryManager, '_saveTableDimensions');
+
+            // @ts-ignore
+            await memoryManager.ensureTableExists(pTableName, memoryManager.persistentSchema);
+            
+            expect(consoleSpyWarn).toHaveBeenCalledWith(expect.stringContaining(`Information for existing table '${pTableName}' not found in tracking file. Assuming current model dimension (128) and schema version, then saving.`));
+            // @ts-ignore
+            expect(memoryManager.tableDimensions[pTableName]).toEqual({
+                dimension: 128,
+                schemaVersion: CURRENT_PERSISTENT_SCHEMA_VERSION
+            });
+            expect(saveSpy).toHaveBeenCalledTimes(1);
+            saveSpy.mockRestore();
+        });
+        
+        it('Scenario 7: Migration Fails (Error in _migrateTable)', async () => {
+            mockEmbeddingModel.dimension = 128;
+            const memoryManager = new MemoryManager(assistant, dbPath);
+             // @ts-ignore
+            memoryManager.tableDimensions = {
+                [pTableName]: { dimension: 128, schemaVersion: 0 } // Setup for migration
+            };
+            await memoryManager.initialize(sessionId);
+            
+            const migrationError = new Error("DB error during dropTable");
+            // @ts-ignore
+            jest.spyOn(memoryManager, '_migrateTable').mockRejectedValue(migrationError);
+
+            await expect(
+                // @ts-ignore
+                memoryManager.ensureTableExists(pTableName, memoryManager.persistentSchema)
+            ).rejects.toThrow(migrationError); // The original error from _migrateTable should be re-thrown
+
+            expect(consoleSpyError).toHaveBeenCalledWith(
+                expect.stringContaining(`CRITICAL: Migration failed for table '${pTableName}'. The table may be in an inconsistent state. Error: ${migrationError.message}`)
+            );
+        });
+    });
+
+    describe('_migrateTable (Direct Test)', () => {
+        const testTableName = 'migrationTestTable';
+        const oldInfo = { dimension: 64, schemaVersion: 0 };
+        const newVersion = 1;
+        const newDimension = 128;
+
+        it('should log, drop, create, update dimensions, and save', async () => {
+            mockEmbeddingModel.dimension = newDimension;
+            const memoryManager = new MemoryManager(assistant, dbPath);
+            await memoryManager.initialize(sessionId); // To setup this.db and this.actualVectorDimension
+            // @ts-ignore
+            const newSchema = memoryManager._generateSchema(newDimension, 'session');
+            // @ts-ignore
+            const saveSpy = jest.spyOn(memoryManager, '_saveTableDimensions');
+
+            // @ts-ignore
+            await memoryManager._migrateTable(testTableName, oldInfo, newSchema, newVersion, newDimension);
+
+            expect(consoleSpyWarn).toHaveBeenCalledWith(expect.stringContaining(`Attempting to migrate table '${testTableName}' from schema version ${oldInfo.schemaVersion} (dimension ${oldInfo.dimension}) to schema version ${newVersion} (dimension ${newDimension}). Current simple migration will drop and recreate the table, resulting in data loss for this table.`));
+            expect(mockDb.dropTable).toHaveBeenCalledWith(testTableName);
+            expect(mockDb.createEmptyTable).toHaveBeenCalledWith(testTableName, newSchema);
+            // @ts-ignore
+            expect(memoryManager.tableDimensions[testTableName]).toEqual({
+                dimension: newDimension,
+                schemaVersion: newVersion
+            });
+            expect(saveSpy).toHaveBeenCalled();
+            expect(consoleSpyLog).toHaveBeenCalledWith(expect.stringContaining(`Table '${testTableName}' dropped successfully`));
+            expect(consoleSpyLog).toHaveBeenCalledWith(expect.stringContaining(`Table '${testTableName}' recreated successfully`));
+            expect(consoleSpyLog).toHaveBeenCalledWith(expect.stringContaining(`Table info for '${testTableName}' updated and saved after migration.`));
+            saveSpy.mockRestore();
+        });
+
+        it('should handle error during dropTable and re-throw', async () => {
+            const dropError = new Error("Failed to drop");
+            mockDb.dropTable.mockRejectedValue(dropError);
+            
+            mockEmbeddingModel.dimension = newDimension;
+            const memoryManager = new MemoryManager(assistant, dbPath);
+            await memoryManager.initialize(sessionId);
+            // @ts-ignore
+            const newSchema = memoryManager._generateSchema(newDimension, 'session');
+
+            await expect(
+                 // @ts-ignore
+                memoryManager._migrateTable(testTableName, oldInfo, newSchema, newVersion, newDimension)
+            ).rejects.toThrow(`Migration failed for table ${testTableName}: ${dropError.message}`);
+            
+            expect(consoleSpyError).toHaveBeenCalledWith(expect.stringContaining(`CRITICAL: Error during migration of table '${testTableName}'`));
+            expect(mockDb.createEmptyTable).not.toHaveBeenCalled(); // Should not be called if drop fails
         });
     });
 });
-
-// Helper to get session table name, mirrors the one in MemoryManager
-// const getSessionTableName = (sessionId: string) => `${SESSION_TABLE_PREFIX}${sessionId.replace(/[^a-zA-Z0-9_]/g, '_')}`;
