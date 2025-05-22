@@ -1,0 +1,10 @@
+/* Styles moved from globals.css for InputArea component */
+
+.fileDropzone {
+    border: 2px dashed var(--file-dropzone-border);
+    transition: all 0.3s ease;
+}
+.fileDropzone.active { /* Note: Need to handle adding 'active' class in component logic */
+    border-color: #0ea5e9; /* Tailwind primary-500 */
+    background-color: rgba(14,165,233,0.1); /* Tailwind primary-500 with alpha */
+}
