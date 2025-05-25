@@ -29,7 +29,19 @@ export function useChat(initialPrompt = '') {
         saveMessageToGun,
     });
 
-    const { createNewConversation, switchConversation } = useConversationManager({ state });
+    const {
+        createNewConversation,
+        switchConversation,
+        renameConversation,
+        deleteConversation,
+        duplicateConversation,
+        updateConversationTags,
+        pinConversation,
+        archiveConversation,
+        exportConversation,
+        importConversation,
+        generateSmartTitle
+    } = useConversationManager({ state });
 
     // 3. Initialize UI Helper Hooks
     useAutoScroll(state.messages, state.messagesEndRef);
@@ -54,8 +66,19 @@ export function useChat(initialPrompt = '') {
         sendMessage,
         handleRegenerate,
         handleCopy, // Directly expose from uiHelpers
+        
+        // Conversation management functions
         createNewConversation,
         switchConversation,
+        renameConversation,
+        deleteConversation,
+        duplicateConversation,
+        updateConversationTags,
+        pinConversation,
+        archiveConversation,
+        exportConversation,
+        importConversation,
+        generateSmartTitle,
 
         // Include input state if handleSubmit is still used/needed
         // input: state.input,

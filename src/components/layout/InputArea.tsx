@@ -182,7 +182,7 @@ const InputArea: React.FC<InputAreaProps> = ({ onSendMessage, isLoading = false 
             id="sendButton"
             onClick={handleSend}
             disabled={isLoading || (!message.trim() && uploadedFiles.length === 0)} // Disable if loading or no text/files
-            className="flex-shrink-0 bg-primary-600 hover:bg-primary-700 text-white w-11 h-[50px] rounded-lg flex items-center justify-center transition-all duration-200 hover:glow disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-primary-600 disabled:hover:glow-none"
+            className="flex-shrink-0 bg-blue-600 hover:bg-blue-700 text-white w-11 h-[50px] rounded-lg flex items-center justify-center transition-all duration-200 shadow-sm hover:shadow-md disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-blue-600 disabled:hover:shadow-sm"
             aria-label="Send message"
           >
             <i className="fas fa-paper-plane"></i> {/* Ensure Font Awesome is loaded */}

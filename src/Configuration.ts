@@ -54,7 +54,6 @@ export default class Configuration extends MultiContextObject {
     return Configuration.instance;
   }
 
-  @contextMethod(SERVER_CONTEXT)
   loadConfig(): void {
     this.config = {
       ...this.config,
@@ -67,8 +66,6 @@ export default class Configuration extends MultiContextObject {
     };
   }
 
-  @contextMethod(SERVER_CONTEXT)
-  @contextMethod(BROWSER_CONTEXT)
   getSharedConfig(key: string): any {
     if (this.privateKeys.includes(key)) {
       throw new Error(`Cannot access private key: ${key}`);

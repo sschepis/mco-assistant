@@ -21,6 +21,8 @@ interface ApiConfig {
     temperature?: number;
     maxTokens?: number;
     systemPrompt?: string;
+    enableAvatarMode?: boolean;
+    userId?: string;
 }
 
 // Define the props needed by the API service hook/functions
@@ -70,6 +72,8 @@ export function useApiService({
                 ...(config?.temperature !== undefined && { temperature: config.temperature }),
                 ...(config?.maxTokens !== undefined && { max_tokens: config.maxTokens }),
                 ...(config?.systemPrompt !== undefined && { system_prompt: config.systemPrompt }),
+                ...(config?.enableAvatarMode !== undefined && { enableAvatarMode: config.enableAvatarMode }),
+                ...(config?.userId !== undefined && { userId: config.userId }),
             };
             console.log("Sending request to API with body:", requestBody);
 

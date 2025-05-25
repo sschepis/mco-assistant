@@ -2,24 +2,241 @@
 import { deepseekProvider, type ToolDefinition, type ToolCall } from '@/lib/ai/models';
 import { spawn } from 'child_process';
 import path from 'path';
+import { PersonalMemoryManager } from '@/ai/PersonalMemoryManager';
+import { PersonalContextManager } from '@/context/PersonalContextManager';
 // Rely on global ReadableStream for Edge Runtime compatibility
 
-// System message to inform the AI about available tools
+// System message for Personal Avatar AI
 const SYSTEM_MESSAGE = `
-You are an AI assistant with access to the following tools:
+You are a personal AI assistant designed to build meaningful relationships with users. Your goal is to:
 
-1. Server-side tools (executed on the server):
-   - bash_tool: Executes bash commands on the server and returns the result
-     Usage: When the user asks about files, system information, or needs to run commands
+1. **Learn and Adapt**: Pay attention to the user's communication style, preferences, and personality
+2. **Be Helpful**: Provide useful information, assistance, and support
+3. **Build Relationships**: Develop familiarity and trust over time through consistent, personalized interactions
+4. **Stay Personal**: Remember past conversations and context to create continuity
+5. **Web Intelligence**: When appropriate, you can search the web for current information or research topics
 
-2. Client-side tools (executed in the user's browser):
-   - update_dom: Updates the innerHTML of DOM elements matching a CSS selector
-     Usage: Call this tool with appropriate arguments to update DOM elements
-     Example parameters: { "selector": "#time", "content": "Current time: ${new Date().toLocaleTimeString()}" }
-     Note: This tool is processed client-side; use it for updating UI elements directly
+Available capabilities:
+- Conversational assistance and support
+- Web search and research (when configured)
+- Content analysis and parsing
+- Memory of past interactions for personalized responses
+- Adaptive communication style based on user preferences
 
-Choose the appropriate tool for each task. Use bash_tool for server operations and use update_dom for UI updates.
+Focus on being genuinely helpful, personable, and building a meaningful relationship with the user. Avoid technical jargon unless the user demonstrates technical expertise. Be warm, supportive, and remember details from previous conversations.
 `;
+
+// Personal Avatar AI Integration
+interface PersonalAvatarProfile {
+  userId?: string;
+  enableAvatarMode?: boolean;
+  communicationStyle?: {
+    formality: number;
+    directness: number;
+    empathy: number;
+    technicality: number;
+  };
+  relationshipStage?: string;
+  trustLevel?: number;
+  familiarity?: number;
+}
+
+// Avatar storage (in production, this would use a database)
+const avatarProfiles = new Map<string, PersonalAvatarProfile>();
+
+// Memory and Context managers for each user
+const memoryManagers = new Map<string, PersonalMemoryManager>();
+const contextManagers = new Map<string, PersonalContextManager>();
+
+// Get or create memory manager for user
+async function getMemoryManager(userId: string): Promise<PersonalMemoryManager> {
+  if (!memoryManagers.has(userId)) {
+    const manager = new PersonalMemoryManager(
+      null, // assistant (can be null for basic usage)
+      `./data/avatar_memory_${userId}`, // dbPath
+      'openai', // embeddingModelSource
+      {} // factExtractionConfig
+    );
+    await manager.initialize(userId);
+    memoryManagers.set(userId, manager);
+  }
+  return memoryManagers.get(userId)!;
+}
+
+// Get or create context manager for user
+async function getContextManager(userId: string): Promise<PersonalContextManager> {
+  if (!contextManagers.has(userId)) {
+    const manager = new PersonalContextManager();
+    await manager.initialize(
+      userId,
+      {
+        dataSharing: 'anonymized',
+        memoryRetention: 'extended',
+        contextDepth: 'standard',
+        externalIntegrations: {
+          calendar: false,
+          email: false,
+          files: false,
+          location: false,
+          activity: false,
+          communications: true,
+          browsing: false,
+          development: false
+        },
+        auditLevel: 'basic'
+      },
+      {
+        enabledSources: ['communications'],
+        updateFrequency: 'realtime',
+        privacyFilters: [],
+        retentionPolicies: []
+      }
+    );
+    contextManagers.set(userId, manager);
+  }
+  return contextManagers.get(userId)!;
+}
+
+function buildPersonalizedPrompt(profile: PersonalAvatarProfile, originalPrompt: string): string {
+  if (!profile.enableAvatarMode) return originalPrompt;
+  
+  const { communicationStyle, relationshipStage, trustLevel, familiarity } = profile;
+  
+  return `${originalPrompt}
+
+PERSONAL AVATAR MODE ACTIVE:
+You are now operating as a Personal Avatar AI for user ${profile.userId}. Your goal is to build a genuine, adaptive relationship.
+
+RELATIONSHIP CONTEXT:
+- Current stage: ${relationshipStage || 'introduction'}
+- Trust level: ${((trustLevel || 0.1) * 100).toFixed(1)}%
+- Familiarity: ${((familiarity || 0.1) * 100).toFixed(1)}%
+
+COMMUNICATION ADAPTATION:
+- Formality: ${communicationStyle?.formality ? (communicationStyle.formality * 100).toFixed(0) + '%' : '50%'} (${(communicationStyle?.formality || 0.5) < 0.3 ? 'casual' : (communicationStyle?.formality || 0.5) < 0.7 ? 'balanced' : 'formal'})
+- Directness: ${communicationStyle?.directness ? (communicationStyle.directness * 100).toFixed(0) + '%' : '60%'} (${(communicationStyle?.directness || 0.6) < 0.3 ? 'diplomatic' : (communicationStyle?.directness || 0.6) < 0.7 ? 'balanced' : 'direct'})
+- Empathy: ${communicationStyle?.empathy ? (communicationStyle.empathy * 100).toFixed(0) + '%' : '70%'} (${(communicationStyle?.empathy || 0.7) < 0.3 ? 'minimal' : (communicationStyle?.empathy || 0.7) < 0.7 ? 'moderate' : 'high empathy'})
+- Technical depth: ${communicationStyle?.technicality ? (communicationStyle.technicality * 100).toFixed(0) + '%' : '70%'} (${(communicationStyle?.technicality || 0.7) < 0.3 ? 'simple' : (communicationStyle?.technicality || 0.7) < 0.7 ? 'moderate' : 'technical'})
+
+BEHAVIORAL GUIDELINES:
+${relationshipStage === 'introduction' ?
+  '- Be welcoming and professional\n- Focus on learning about the user\n- Ask thoughtful questions\n- Show genuine interest' :
+relationshipStage === 'developing' ?
+  '- Show familiarity with previous interactions\n- Build on established patterns\n- Be more personal while maintaining respect' :
+  '- Communicate with comfortable familiarity\n- Show deep understanding\n- Anticipate needs'
+}
+
+IMPORTANT: Adapt your response style to match the numerical values above. Remember this is about building a genuine relationship, not just answering questions.`;
+}
+
+async function updateAvatarProfile(userId: string, userMessage: string): Promise<PersonalAvatarProfile> {
+  const profile = avatarProfiles.get(userId) || {
+    userId,
+    enableAvatarMode: true,
+    communicationStyle: {
+      formality: 0.5,
+      directness: 0.6,
+      empathy: 0.7,
+      technicality: 0.7
+    },
+    relationshipStage: 'introduction',
+    trustLevel: 0.1,
+    familiarity: 0.1
+  };
+
+  try {
+    // Get sophisticated memory and context managers
+    const memoryManager = await getMemoryManager(userId);
+    const contextManager = await getContextManager(userId);
+
+    // Store interaction in personal memory
+    const personalContext = await contextManager.gatherCurrentContext();
+    await memoryManager.storeUserInteraction({
+      id: `interaction_${userId}_${Date.now()}`,
+      userId,
+      sessionId: userId, // Using userId as sessionId for simplicity
+      timestamp: new Date(),
+      userMessage: userMessage,
+      avatarResponse: '', // Will be filled when response is ready
+      context: {
+        timeOfDay: new Date().getHours() < 12 ? 'morning' : new Date().getHours() < 18 ? 'afternoon' : 'evening',
+        recentEvents: (personalContext.recentActivities || []).map(activity => activity.description || 'Recent activity'),
+        environmentType: 'personal',
+        availabilityStatus: 'available',
+        activeProjects: (personalContext.activeProjects || []).map(project => project.name || 'Active project')
+      },
+      feedback: undefined,
+      metadata: {
+        provider: 'deepseek',
+        model: 'deepseek-chat',
+        tokensUsed: 0, // Will be updated later
+        processingTime: 0, // Will be updated later
+        contextSources: ['chat'],
+        personalityVersion: 1,
+        memoryRetrievals: 0
+      }
+    });
+
+    // Update personality based on sophisticated analysis
+    const personalityProfile = await memoryManager.getPersonalityProfile(userId);
+    if (personalityProfile) {
+      profile.communicationStyle = {
+        ...profile.communicationStyle,
+        formality: personalityProfile.communicationStyle?.formality || profile.communicationStyle?.formality || 0.5,
+        directness: personalityProfile.communicationStyle?.directness || profile.communicationStyle?.directness || 0.6,
+        empathy: personalityProfile.communicationStyle?.empathy || profile.communicationStyle?.empathy || 0.7,
+        technicality: personalityProfile.communicationStyle?.technicality || profile.communicationStyle?.technicality || 0.7
+      };
+    }
+
+    // Get bonding metrics from memory
+    const bondingMetrics = await memoryManager.getBondingMetrics(userId);
+    if (bondingMetrics) {
+      profile.trustLevel = bondingMetrics.trustLevel;
+      profile.familiarity = bondingMetrics.familiarity;
+      profile.relationshipStage = bondingMetrics.relationshipStage as 'introduction' | 'developing' | 'established';
+    }
+
+    console.log(`Avatar profile updated with sophisticated memory for user: ${userId}`);
+
+  } catch (error) {
+    console.warn('Error in sophisticated avatar update, falling back to basic:', error);
+    
+    // Fallback to basic learning
+    const message = userMessage.toLowerCase();
+    
+    // Update communication style based on patterns
+    if (message.length > 100) {
+      profile.communicationStyle!.technicality = Math.min(1, profile.communicationStyle!.technicality + 0.05);
+    }
+    
+    if (message.includes('please') || message.includes('thank')) {
+      profile.communicationStyle!.formality = Math.min(1, profile.communicationStyle!.formality + 0.05);
+    }
+    
+    if (message.includes('feel') || message.includes('emotion') || message.includes('relationship')) {
+      profile.communicationStyle!.empathy = Math.min(1, profile.communicationStyle!.empathy + 0.05);
+    }
+
+    // Update relationship metrics
+    profile.familiarity = Math.min(1, (profile.familiarity || 0.1) + 0.02);
+    
+    // Positive interaction indicators
+    if (message.includes('great') || message.includes('thank') || message.includes('love') || message.includes('wonderful')) {
+      profile.trustLevel = Math.min(1, (profile.trustLevel || 0.1) + 0.03);
+    }
+
+    // Update relationship stage based on metrics
+    if ((profile.trustLevel || 0) > 0.7 && (profile.familiarity || 0) > 0.7) {
+      profile.relationshipStage = 'established';
+    } else if ((profile.trustLevel || 0) > 0.4 && (profile.familiarity || 0) > 0.4) {
+      profile.relationshipStage = 'developing';
+    }
+  }
+
+  avatarProfiles.set(userId, profile);
+  return profile;
+}
 
 // Define our Message type for the request
 interface RequestMessage {
@@ -39,6 +256,9 @@ interface ChatRequestBody {
   // frequency_penalty?: number;
   // presence_penalty?: number;
   system_prompt?: string;
+  // Personal Avatar AI integration
+  userId?: string;
+  enableAvatarMode?: boolean;
 }
 
 // Define types for our API communication
@@ -265,7 +485,9 @@ export async function POST(req: Request) {
       messages,
       temperature = 0.7, // Default temperature
       max_tokens = 1000, // Default max_tokens
-      system_prompt = SYSTEM_MESSAGE // Default to hardcoded system message
+      system_prompt = SYSTEM_MESSAGE, // Default to hardcoded system message
+      userId,
+      enableAvatarMode = false
     } = requestBody;
     let conversationId = requestBody.conversationId; // Get ID from request
 
@@ -277,7 +499,7 @@ export async function POST(req: Request) {
       console.log(`API Route: Using provided conversationId: ${conversationId}`);
     }
 
-    console.log("API Route: Processing chat request with config:", { temperature, max_tokens });
+    console.log("API Route: Processing chat request with config:", { temperature, max_tokens, enableAvatarMode });
 
     // Get the last user message (still needed for logging or other logic)
     const lastUserMessage = messages.filter(msg => msg.role === 'user').pop();
@@ -288,12 +510,21 @@ export async function POST(req: Request) {
 
     console.log("Last user message:", lastUserMessage.content);
 
-    // Use the provided or default system prompt
-    console.log("Using System Prompt:", system_prompt === SYSTEM_MESSAGE ? "Default" : "Custom");
+    // Personal Avatar AI Integration
+    let finalSystemPrompt = system_prompt;
+    if (enableAvatarMode && userId) {
+      console.log("Avatar mode enabled for user:", userId);
+      const avatarProfile = await updateAvatarProfile(userId, lastUserMessage.content);
+      finalSystemPrompt = buildPersonalizedPrompt(avatarProfile, system_prompt);
+      console.log("Using personalized avatar prompt");
+    }
+
+    // Use the finalized system prompt
+    console.log("Using System Prompt:", finalSystemPrompt === SYSTEM_MESSAGE ? "Default" : (enableAvatarMode ? "Avatar-Enhanced" : "Custom"));
     const formattedMessages: FormattedMessage[] = [
       {
         role: 'system',
-        content: system_prompt // Use the system_prompt from the request or the default
+        content: finalSystemPrompt // Use the avatar-enhanced or default system prompt
       },
       ...messages.map(msg => ({
         role: msg.role,

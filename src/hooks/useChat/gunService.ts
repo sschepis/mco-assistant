@@ -65,16 +65,42 @@ export function useGunService({ state }: GunServiceProps) {
             if (convData && convData.id && convData.timestamp) {
                 setConversations(prev => {
                     const existingIndex = prev.findIndex(c => c.id === key);
-                    const newConv = { id: key, title: convData.title || `Chat ${key}`, timestamp: convData.timestamp };
+                    const newConv = {
+                        id: key,
+                        title: convData.title || `Chat ${key}`,
+                        timestamp: convData.timestamp,
+                        lastModified: convData.lastModified || convData.timestamp,
+                        messageCount: convData.messageCount || 0,
+                        tags: convData.tags || [],
+                        category: convData.category,
+                        pinned: convData.pinned || false,
+                        archived: convData.archived || false
+                    };
                     const updated = [...prev]; // Use const
                     if (existingIndex > -1) {
-                        if (prev[existingIndex].timestamp < newConv.timestamp || prev[existingIndex].title !== newConv.title) {
+                        const existing = prev[existingIndex];
+                        const needsUpdate =
+                            existing.timestamp < newConv.timestamp ||
+                            existing.title !== newConv.title ||
+                            existing.lastModified !== newConv.lastModified ||
+                            existing.pinned !== newConv.pinned ||
+                            existing.archived !== newConv.archived ||
+                            JSON.stringify(existing.tags) !== JSON.stringify(newConv.tags);
+                        
+                        if (needsUpdate) {
                             updated[existingIndex] = newConv; // Reassignment is fine here
-                        } else { return prev; } // No change
+                        } else {
+                            return prev; // No change
+                        }
                     } else {
                         updated.push(newConv);
                     }
-                    return updated.sort((a, b) => b.timestamp - a.timestamp);
+                    // Sort: pinned first, then by lastModified/timestamp
+                    return updated.sort((a, b) => {
+                        if (a.pinned && !b.pinned) return -1;
+                        if (!a.pinned && b.pinned) return 1;
+                        return (b.lastModified || b.timestamp) - (a.lastModified || a.timestamp);
+                    });
                 });
             } else if (data === null) {
                 setConversations(prev => prev.filter(c => c.id !== key));

@@ -23,7 +23,32 @@ export interface Conversation {
   id: string; // Unique identifier (e.g., timestamp or UUID)
   title: string; // Title of the conversation (e.g., first user message, or generated)
   timestamp: number; // Timestamp of creation or last update
+  lastModified?: number; // Last time the conversation was modified
+  messageCount?: number; // Number of messages in the conversation
+  tags?: string[]; // Tags for categorization
+  category?: string; // Category for organization
+  pinned?: boolean; // Whether the conversation is pinned
+  archived?: boolean; // Whether the conversation is archived
   // Add other metadata like user ID, model used, etc. if needed
+}
+
+// Represents conversation search and filter options
+export interface ConversationSearchOptions {
+  query?: string;
+  tags?: string[];
+  category?: string;
+  dateFrom?: Date;
+  dateTo?: Date;
+  pinned?: boolean;
+  archived?: boolean;
+}
+
+// Represents conversation export format
+export interface ConversationExport {
+  conversation: Conversation;
+  messages: Message[];
+  exportDate: number;
+  version: string;
 }
 
 export interface DataProvider {

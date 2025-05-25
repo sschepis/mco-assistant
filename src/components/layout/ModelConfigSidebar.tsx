@@ -2,7 +2,9 @@
 
 // Assuming Font Awesome is set up globally or via a different method in Next.js
 
-import React, { useState, ChangeEvent, Dispatch, SetStateAction } from 'react'; // Consolidate imports
+import React, { useState, ChangeEvent, Dispatch, SetStateAction } from 'react';
+import AddMemoryModal from '../AddMemoryModal';
+import ModelConfigSection from './ModelConfigSection'; // Import the new component
 
 // Define a type for memory search results (adjust based on actual return type)
 interface MemorySearchResult {
@@ -12,67 +14,113 @@ interface MemorySearchResult {
   type: 'session' | 'persistent';
 }
 
+// Define a type for advanced search parameters
+export type FilterType = 'all' | 'session' | 'persistent'; // Export for use in Layout.tsx
+export interface MemorySearchParameters {
+  query: string;
+  filterType?: FilterType;
+  filterDateStart?: string;
+  filterDateEnd?: string;
+  // Future: add limits, sort options etc.
+}
+
 interface ModelConfigSidebarProps {
   isOpen: boolean;
-  temperature: number;
-  setTemperature: Dispatch<SetStateAction<number>>;
-  maxTokens: number; // Add maxTokens prop
-  setMaxTokens: Dispatch<SetStateAction<number>>; // Add setMaxTokens prop
-  systemPrompt: string;
-  setSystemPrompt: Dispatch<SetStateAction<string>>;
-  // Placeholder for the actual search function prop
-  onMemorySearch?: (query: string) => Promise<MemorySearchResult[]>;
+  maxTokens: number;
+  setMaxTokens: Dispatch<SetStateAction<number>>;
+  onMemorySearch?: (params: MemorySearchParameters) => Promise<MemorySearchResult[]>;
 }
 
 const ModelConfigSidebar: React.FC<ModelConfigSidebarProps> = ({
   isOpen,
-  temperature,
-  setTemperature,
   maxTokens,
   setMaxTokens,
-  systemPrompt,
-  setSystemPrompt,
-  onMemorySearch = async () => { console.warn("onMemorySearch not implemented"); return []; }, // Default placeholder
+  onMemorySearch = async () => { console.warn("onMemorySearch not implemented"); return []; },
 }) => {
 
   // State for memory search
   const [memoryQuery, setMemoryQuery] = useState('');
   const [memoryResults, setMemoryResults] = useState<MemorySearchResult[]>([]);
   const [isSearchingMemory, setIsSearchingMemory] = useState(false);
+  const [searchHistory, setSearchHistory] = useState<string[]>([]);
+  const [showHistory, setShowHistory] = useState(false);
+  const [suggestions, setSuggestions] = useState<string[]>([]);
+  const [activeSuggestionIndex, setActiveSuggestionIndex] = useState(-1);
+  const [expandedResultIndices, setExpandedResultIndices] = useState<Set<number>>(new Set());
+  const [isAddMemoryModalOpen, setIsAddMemoryModalOpen] = useState(false); // State for modal visibility
 
-  // Helper to map slider value (0, 1, 2) to token count
-  const mapSliderToMaxTokens = (value: number): number => {
-    if (value === 0) return 500; // Short
-    if (value === 1) return 1000; // Medium
-    if (value === 2) return 2000; // Long
-    return 1000; // Default
+  // State for advanced search filters is already defined above with FilterType
+  const [filterType, setFilterType] = useState<FilterType>('all');
+  const [filterDateStart, setFilterDateStart] = useState('');
+  const [filterDateEnd, setFilterDateEnd] = useState('');
+
+
+  const MAX_HISTORY_LENGTH = 10;
+  const MAX_SUGGESTIONS = 5;
+
+  const addToSearchHistory = (query: string) => {
+    if (!query.trim()) return;
+    setSearchHistory(prevHistory => {
+      const newHistory = [query.trim(), ...prevHistory.filter(h => h !== query.trim())];
+      return newHistory.slice(0, MAX_HISTORY_LENGTH);
+    });
   };
 
-  // Helper to map token count back to slider value (0, 1, 2)
-  const mapMaxTokensToSlider = (tokens: number): number => {
-    if (tokens <= 500) return 0;
-    if (tokens <= 1000) return 1;
-    return 2;
-  };
+  // Update suggestions when memoryQuery or searchHistory changes
+  React.useEffect(() => {
+    if (memoryQuery.trim() === '') {
+      setSuggestions(searchHistory.slice(0, MAX_SUGGESTIONS)); // Show recent history if query is empty
+    } else {
+      const filtered = searchHistory.filter(h =>
+        h.toLowerCase().includes(memoryQuery.toLowerCase()) && h.toLowerCase() !== memoryQuery.toLowerCase()
+      );
+      setSuggestions(filtered.slice(0, MAX_SUGGESTIONS));
+    }
+  }, [memoryQuery, searchHistory]);
 
-  // Helper to get the label for the current maxTokens
-  const getMaxTokensLabel = (tokens: number): string => {
-    if (tokens <= 500) return 'Short';
-    if (tokens <= 1000) return 'Medium';
-    return 'Long';
-  };
+  // Removed helper functions as they are now in ModelConfigSection
 
 
   const handleMemoryQueryChange = (event: ChangeEvent<HTMLInputElement>) => {
-    setMemoryQuery(event.target.value);
+    const query = event.target.value;
+    setMemoryQuery(query);
+    if (query.trim() !== '') {
+      setShowHistory(true); // Keep/show suggestions while typing
+    } else {
+      // If query is cleared, show history or hide if no history
+      setShowHistory(searchHistory.length > 0);
+    }
+    setActiveSuggestionIndex(-1); // Reset active suggestion on query change
   };
 
-  const handleMemorySearchClick = async () => {
-    if (!memoryQuery.trim() || !onMemorySearch) return;
+  const handleMemorySearchClick = async (searchQuery?: string) => { // Allow passing query for suggestion selection
+    const queryToSearch = searchQuery || memoryQuery;
+    if (!queryToSearch.trim() || !onMemorySearch) return;
+
     setIsSearchingMemory(true);
     setMemoryResults([]); // Clear previous results
+    addToSearchHistory(queryToSearch); // Add to history
+    setShowHistory(false); // Hide history on search
+    setActiveSuggestionIndex(-1);
+    if (!queryToSearch.trim() || !onMemorySearch) return;
+
+    setIsSearchingMemory(true);
+    setMemoryResults([]); // Clear previous results
+    addToSearchHistory(queryToSearch); // Add to history
+    setShowHistory(false); // Hide history on search
+    setActiveSuggestionIndex(-1); // Reset active suggestion
+
+    const searchParams: MemorySearchParameters = {
+      query: memoryQuery,
+      filterType: filterType,
+    };
+    if (filterDateStart) searchParams.filterDateStart = filterDateStart;
+    if (filterDateEnd) searchParams.filterDateEnd = filterDateEnd;
+
+    console.log("Performing memory search with params:", searchParams);
+
     try {
-      const results = await onMemorySearch(memoryQuery);
+      const results = await onMemorySearch(searchParams);
       setMemoryResults(results);
     } catch (error) {
       console.error("Error searching memory:", error);
@@ -82,11 +130,41 @@ const ModelConfigSidebar: React.FC<ModelConfigSidebarProps> = ({
     }
   };
 
+
   const handleMemoryKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
-    if (event.key === 'Enter') {
+    if (showHistory && suggestions.length > 0) {
+      if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        setActiveSuggestionIndex(prevIndex =>
+          prevIndex === suggestions.length - 1 ? 0 : prevIndex + 1
+        );
+      } else if (event.key === 'ArrowUp') {
+        event.preventDefault();
+        setActiveSuggestionIndex(prevIndex =>
+          prevIndex <= 0 ? suggestions.length - 1 : prevIndex - 1
+        );
+      } else if (event.key === 'Enter') {
+        event.preventDefault();
+        if (activeSuggestionIndex >= 0 && activeSuggestionIndex < suggestions.length) {
+          const selectedQuery = suggestions[activeSuggestionIndex];
+          setMemoryQuery(selectedQuery);
+          handleMemorySearchClick(selectedQuery); // Pass selected query
+          setShowHistory(false);
+          setActiveSuggestionIndex(-1);
+        } else {
+          handleMemorySearchClick(); // Regular search if no suggestion highlighted
+        }
+      } else if (event.key === 'Escape') {
+        event.preventDefault();
+        setShowHistory(false);
+        setActiveSuggestionIndex(-1);
+      }
+    } else if (event.key === 'Enter') {
+      // If suggestions are not shown or empty, Enter just triggers search
       handleMemorySearchClick();
     }
   };
+
 
 
   if (!isOpen) {
@@ -97,113 +175,10 @@ const ModelConfigSidebar: React.FC<ModelConfigSidebarProps> = ({
     <div className="hidden xl:block w-80 p-4 overflow-y-auto flex-shrink-0 bg-white dark:bg-dark-800 border-gray-200 dark:border-gray-700">
       <div className="space-y-6">
         {/* Model Configuration Section */}
-        <div>
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="font-medium">Model Configuration</h3> {/* Text color will be inherited and should be fine */}
-            <div className="flex space-x-2">
-              {/* TODO: Update button styles for light/dark theme */}
-              <button className="text-xs bg-gray-100 text-gray-600 hover:text-primary-600 px-2 py-0.5 rounded border border-gray-300 dark:bg-dark-700 dark:text-gray-400 dark:hover:text-primary-400 dark:border-gray-800 transition-colors">
-                <i className="fas fa-history mr-1"></i> Reset
-              </button>
-              <button className="text-xs bg-primary-100 text-primary-700 hover:bg-primary-200 px-2 py-0.5 rounded border border-primary-600 dark:bg-primary-900/30 dark:text-primary-400 dark:hover:bg-primary-800/50 dark:border-primary-800/30 transition-colors">
-                <i className="fas fa-save mr-1"></i> Save
-              </button>
-            </div>
-          </div>
-
-          <div className="space-y-5">
-            {/* Model Version Dropdown */}
-            <div>
-              <div className="flex items-center justify-between mb-1">
-                <label className="text-sm font-medium text-gray-700 dark:text-gray-300">Model Version</label>
-                <span className="text-xs px-2 py-0.5 rounded text-primary-700 bg-primary-100 dark:text-primary-400 dark:bg-primary-900/20">Default</span>
-              </div>
-              {/* Model Version Dropdown - Only DeepSeek Chat */}
-              <select className="w-full rounded-lg py-2 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent bg-gray-50 dark:bg-dark-700 border border-gray-300 dark:border-gray-700 text-gray-900 dark:text-gray-100">
-                <option value="deepseek-chat">DeepSeek Chat</option>
-                {/* Other models removed */}
-              </select>
-            </div>
-
-            {/* Creativity Slider */}
-            <div>
-              <div className="flex items-center justify-between mb-1">
-                <label htmlFor="temperature-slider" className="text-sm font-medium text-gray-300">Creativity</label>
-                {/* Display the actual temperature value */}
-                <span className="text-xs text-gray-400 font-mono">{temperature.toFixed(1)}</span>
-              </div>
-              <input
-                id="temperature-slider"
-                type="range"
-                min="0"
-                max="1" // DeepSeek temperature range is typically 0-1 or 0-2, check docs if needed
-                step="0.1"
-                value={temperature} // Use value prop for controlled component
-                onChange={(e) => setTemperature(parseFloat(e.target.value))} // Update state on change
-                className="w-full h-1.5 bg-gray-800 rounded-lg appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-primary-500"
-              />
-              <div className="flex justify-between text-xs text-gray-500 mt-1">
-                <span>Precise (0.0)</span>
-                {/* Removed Balanced label */}
-                <span>Creative</span>
-              </div>
-            </div>
-
-            {/* Response Length Slider */}
-            <div>
-              <div className="flex items-center justify-between mb-1">
-                <label htmlFor="max-tokens-slider" className="text-sm font-medium text-gray-300">Response Length</label>
-                {/* Display the label corresponding to the current maxTokens */}
-                <span className="text-xs text-gray-400">{getMaxTokensLabel(maxTokens)}</span>
-              </div>
-              <input
-                id="max-tokens-slider"
-                type="range"
-                min="0"
-                max="2"
-                step="1"
-                value={mapMaxTokensToSlider(maxTokens)} // Map current maxTokens to slider value
-                onChange={(e) => setMaxTokens(mapSliderToMaxTokens(parseInt(e.target.value)))} // Map slider value back to maxTokens and update state
-                className="w-full h-1.5 bg-gray-800 rounded-lg appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-primary-500"
-              />
-              <div className="flex justify-between text-xs text-gray-500 mt-1">
-                <span>Short (~500)</span>
-                <span>Medium (~1k)</span>
-                <span>Long</span>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Advanced Parameters Section Removed - Top P/K, Freq/Pres Penalty not supported by current DeepSeekProvider */}
-        {/*
-        <div className="pt-4 border-gray-800">
-          <h3 className="font-medium mb-4">Advanced Parameters</h3>
-          <div className="space-y-5">
-            // Top P/K Slider Removed
-            // Frequency Penalty Slider Removed
-            // Presence Penalty Slider Removed
-          </div>
-        </div>
-        */}
-
-        {/* System Prompt Section */}
-        <div className="pt-4 border-gray-800">
-          <h3 className="font-medium mb-3">System Prompt</h3>
-          <textarea
-            id="system-prompt-textarea"
-            className="w-full bg-dark-700 border border-gray-800 rounded-lg py-2 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent text-gray-100"
-            rows={6} // Increased rows for better visibility
-            placeholder="Enter custom instructions for the AI..."
-            value={systemPrompt} // Use value prop for controlled component
-            onChange={(e) => setSystemPrompt(e.target.value)} // Update state on change
-          />
-          <div className="flex items-center justify-between mt-2">
-            {/* Simple character count for now */}
-            <span className="text-xs text-gray-400">Length: {systemPrompt.length}</span>
-            <button className="text-xs text-primary-400 hover:underline">Insert template</button>
-          </div>
-        </div>
+        <ModelConfigSection
+          maxTokens={maxTokens}
+          setMaxTokens={setMaxTokens}
+        />
 
         {/* Memory Search Section */}
         <div className="pt-4 border-gray-800">
@@ -215,11 +190,34 @@ const ModelConfigSidebar: React.FC<ModelConfigSidebarProps> = ({
               value={memoryQuery}
               onChange={handleMemoryQueryChange}
               onKeyDown={handleMemoryKeyDown}
+              onFocus={() => (memoryQuery.trim() === '' && searchHistory.length > 0 && suggestions.length > 0) || (memoryQuery.trim() !== '' && suggestions.length > 0) ? setShowHistory(true) : null}
+              onBlur={() => setTimeout(() => setShowHistory(false), 150)} // Delay to allow click on history/suggestion item
               className="w-full pl-3 pr-10 py-2 rounded-lg border border-gray-700 bg-dark-700 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent text-gray-200 placeholder-gray-500"
               disabled={isSearchingMemory}
             />
+            {showHistory && suggestions.length > 0 && (
+              <div className="absolute z-10 w-full mt-1 bg-dark-700 border border-gray-600 rounded-md shadow-lg max-h-40 overflow-y-auto">
+                {suggestions.map((suggestionQuery, index) => (
+                  <div
+                    key={index}
+                    className={`px-3 py-2 text-sm text-gray-300 hover:bg-dark-600 cursor-pointer ${
+                      index === activeSuggestionIndex ? 'bg-dark-600' : ''
+                    }`}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      setMemoryQuery(suggestionQuery);
+                      handleMemorySearchClick(suggestionQuery); // Pass selected query
+                      setShowHistory(false);
+                      setActiveSuggestionIndex(-1);
+                    }}
+                  >
+                    {suggestionQuery}
+                  </div>
+                ))}
+              </div>
+            )}
             <button
-              onClick={handleMemorySearchClick}
+              onClick={() => handleMemorySearchClick()} // Call via arrow function
               disabled={isSearchingMemory || !memoryQuery.trim()}
               className="absolute right-1 top-1 bottom-1 px-2 text-gray-400 hover:text-primary-400 disabled:text-gray-600 disabled:cursor-not-allowed"
               aria-label="Search memories"
@@ -231,29 +229,105 @@ const ModelConfigSidebar: React.FC<ModelConfigSidebarProps> = ({
               )}
             </button>
           </div>
+
+          {/* Advanced Search Filters UI */}
+          <div className="mb-3 space-y-2 text-xs">
+            <div className="text-gray-400">Filter by type:</div>
+            <div className="flex space-x-2">
+              {(['all', 'session', 'persistent'] as FilterType[]).map(type => (
+                <button
+                  key={type}
+                  onClick={() => setFilterType(type)}
+                  className={`px-2 py-1 rounded ${filterType === type ? 'bg-primary-600 text-white' : 'bg-dark-600 text-gray-300 hover:bg-dark-500'}`}
+                >
+                  {type.charAt(0).toUpperCase() + type.slice(1)}
+                </button>
+              ))}
+            </div>
+            {/* Basic Date Filter Inputs - can be improved with date pickers later */}
+            <div className="text-gray-400 mt-2">Filter by date:</div>
+            <div className="flex space-x-2">
+              <input type="date" value={filterDateStart} onChange={e => setFilterDateStart(e.target.value)} className="bg-dark-600 text-gray-300 p-1 rounded border border-gray-700 text-xs w-1/2" />
+              <input type="date" value={filterDateEnd} onChange={e => setFilterDateEnd(e.target.value)} className="bg-dark-600 text-gray-300 p-1 rounded border border-gray-700 text-xs w-1/2" />
+            </div>
+          </div>
+
           {/* Results Area */}
           <div className="space-y-2 max-h-48 overflow-y-auto border border-gray-800 rounded-md p-2 bg-dark-900/30">
             {isSearchingMemory && <p className="text-xs text-gray-500 text-center">Searching...</p>}
             {!isSearchingMemory && memoryResults.length === 0 && (
               <p className="text-xs text-gray-500 text-center">No results found.</p>
             )}
-            {!isSearchingMemory && memoryResults.map((result, index) => (
-              <div key={index} className="text-xs p-2 bg-dark-700 rounded border border-gray-700">
-                <p className="text-gray-300 truncate mb-1" title={result.text}>{result.text}</p>
-                <div className="flex justify-between items-center text-gray-500">
-                   <span className={`capitalize px-1.5 py-0.5 rounded text-xxs ${result.type === 'persistent' ? 'bg-blue-900/50 text-blue-300' : 'bg-purple-900/50 text-purple-300'}`}>
-                     {result.type}
-                   </span>
-                   <span className="font-mono">Score: {result.score.toFixed(4)}</span>
+            {!isSearchingMemory && memoryResults.map((result, index) => {
+              const isExpanded = expandedResultIndices.has(index);
+              const toggleExpand = () => {
+                setExpandedResultIndices(prev => {
+                  const newSet = new Set(prev);
+                  if (newSet.has(index)) {
+                    newSet.delete(index);
+                  } else {
+                    newSet.add(index);
+                  }
+                  return newSet;
+                });
+              };
+
+              return (
+                <div key={index} className="text-xs p-2 bg-dark-700 rounded border border-gray-700 cursor-pointer" onClick={toggleExpand}>
+                  <div className="flex justify-between items-center mb-1">
+                    <p className="text-gray-300 font-medium">
+                      {isExpanded ? result.text : (result.text.length > 100 ? result.text.substring(0, 100) + '...' : result.text)}
+                    </p>
+                    <i className={`fas ${isExpanded ? 'fa-chevron-up' : 'fa-chevron-down'} text-gray-500 ml-2`}></i>
+                  </div>
+                  {isExpanded && (
+                    <div className="mt-2 space-y-1">
+                      <p className="text-gray-400">Score: <span className="font-mono">{result.score.toFixed(4)}</span></p>
+                      <p className="text-gray-400">Type: <span className={`capitalize px-1.5 py-0.5 rounded text-xxs ${result.type === 'persistent' ? 'bg-blue-900/50 text-blue-300' : 'bg-purple-900/50 text-purple-300'}`}>{result.type}</span></p>
+                      {Array.isArray(result.source) ? (
+                        <p className="text-gray-400">Sources: {result.source.join(', ')}</p>
+                      ) : (
+                        <p className="text-gray-400">Source: {result.source}</p>
+                      )}
+                    </div>
+                  )}
+                  {!isExpanded && (
+                    <div className="flex justify-between items-center text-gray-500">
+                      <span className={`capitalize px-1.5 py-0.5 rounded text-xxs ${result.type === 'persistent' ? 'bg-blue-900/50 text-blue-300' : 'bg-purple-900/50 text-purple-300'}`}>
+                        {result.type}
+                      </span>
+                      <span className="font-mono">Score: {result.score.toFixed(4)}</span>
+                    </div>
+                  )}
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
+        </div>
+
+        {/* Add Memory Button */}
+        <div className="pt-4 border-gray-800">
+          <button
+            onClick={() => setIsAddMemoryModalOpen(true)}
+            className="w-full bg-blue-600 text-white py-2 rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors flex items-center justify-center"
+          >
+            <i className="fas fa-plus-circle mr-2"></i>
+            Add New Memory
+          </button>
         </div>
 
         {/* Knowledge & Context Section Removed */}
         {/* ... */}
       </div>
+      <AddMemoryModal
+        isOpen={isAddMemoryModalOpen}
+        onClose={() => setIsAddMemoryModalOpen(false)}
+        onAddMemorySuccess={() => {
+          // Optionally, refresh memory search results or show a success message
+          // For now, just close the modal
+          setIsAddMemoryModalOpen(false);
+        }}
+      />
     </div>
   );
 };
